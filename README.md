@@ -6,7 +6,7 @@ It is fully free and fully open source. The license is Apache 2.0, meaning you a
 
 ## Documentation
 
-The role of this codec plugin is to extract content out of compressed JSON telemetry streams produced by the network. The codec generates logstash events which can then be handled by the output stage using an output plugin which matches the consuming application. For example, logstash running with this plugin as input codec, might use;
+The role of this codec plugin is to extract content out of compressed JSON telemetry streams produced by the network and carried over stream based transport (e.g. TCP).  A [sister plugin](https://github.com/cisco/logstash-codec-bigmuddy-network-telemetry-gpb) handles protobuf encoded content. The codec generates logstash events which can then be handled by the output stage using an output plugin which matches the consuming application. For example, logstash running with this plugin as input codec, might use;
 
 - the [elasticsearch output plugin](https://github.com/logstash-plugins/logstash-output-elasticsearch) in order to push content in [elasticsearch](https://www.elastic.co/products/elasticsearch).
 - a [transport output plugin](https://github.com/logstash-plugins/logstash-output-tcp) to push telemetry content into [Splunk](http://www.splunk.com/).
@@ -17,9 +17,7 @@ A collection of pre-packaged and pre-configured [container based stacks](https:/
 
 Further documentation is provided in the [plugin source](/lib/logstash/codecs/telemetry.rb).
 
----
-Note: The streaming telemetry project is work in progress, and both the on and off box component of streaming telemetry are likely to evolve at a fast pace.
----
+__Note: The streaming telemetry project is work in progress, and both the on and off box components of streaming telemetry are likely to evolve at a fast pace.__
 
 ## Massaging the content through configuration options
 
