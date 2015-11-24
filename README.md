@@ -240,19 +240,7 @@ bundle install
 
 #### Test
 
-- Update your dependencies
-
-```sh
-bundle install
-```
-
-- Run tests
-
-```sh
-bundle exec rspec
-```
-
-Unit test effort in progress.
+Unit test development in progress.
 
 ### 2. Running your unpublished Plugin in Logstash
 
