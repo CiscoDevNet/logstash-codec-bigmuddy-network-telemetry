@@ -5,33 +5,10 @@ require "logstash/namespace"
 require "json"
 require "zlib"
 
-TS_CODEC_HEADER_LENGTH_IN_BYTES = 4
-
 #
-# Payload is encoded as TLV, with two types.
+# IOS XR 6.0.0 wire format
 #
-module TSCodecTLVType
-  #
-  # Type 1 carries signal to reset decompressor. No content is carried
-  # in the compressor reset.
-  #
-  TS_CODEC_TLV_TYPE_COMPRESSOR_RESET = 1
-  #
-  # Type 2 carries compressed JSON
-  #
-  TS_CODEC_TLV_TYPE_COMPRESSED_JSON = 2
-end
-
-#
-# Outermost description of the messages in the stream
-#
-module TSCodecState
-  TS_CODEC_PENDING_HEADER = 1
-  TS_CODEC_PENDING_DATA = 2
-end
-
-#
-# JSON Telemetry encoding:
+# JSON Telemetry encoding
 #
 # ----------------------------------
 #
@@ -46,6 +23,59 @@ end
 # V   - Block (T == TS_CODEC_TLV_TYPE_COMPRESSOR_RESET => 0 length)
 #
 # ----------------------------------
+TS_CODEC_HEADER_LENGTH_IN_BYTES = 4
+#
+# Payload is encoded as TLV, with two types
+#
+module TSCodecTLVType
+  #
+  # Type 1 carries signal to reset decompressor. No content is carried
+  # in the compressor reset.
+  #
+  TS_CODEC_TLV_TYPE_COMPRESSOR_RESET = 1
+  #
+  # Type 2 carries compressed JSON
+  #
+  TS_CODEC_TLV_TYPE_JSON = 2
+end
+
+#
+# IOS XR 6.1.0 wire format (version 2)
+#
+# JSON Telemetry encoding
+#
+# ----------------------------------
+#
+#       +-+-+-+-...-++-+-+-+-...-++-+-+-+-...+
+#       |T|F|L|V... ||T|F|L|V... ||T|F|L|V...|
+#       +-+-+-+-...-++-+-+-+-...-++-+-+-+-...+
+#
+# T   - 32 bits, type (JSON == 2), currently the only supported value (GPB
+#       variant over TCP not supported by codec yet) TSCodecTLVTypeV2
+# F   - 32 bits, 0x1 indicates ZLIB compression
+# L   - Length of block excluding header
+# V   - Data block
+#
+# ----------------------------------
+
+TS_CODEC_HEADER_LENGTH_IN_BYTES_V2 = 12
+
+module TSCodecTLVTypeV2
+  #
+  # Type 1 carries signal to reset decompressor. No content is carried
+  # in the compressor reset.
+  #
+  TS_CODEC_TLV_TYPE_V2_JSON = 2
+end
+
+#
+# Outermost description of the messages in the stream
+#
+module TSCodecState
+  TS_CODEC_PENDING_HEADER = 1
+  TS_CODEC_PENDING_DATA = 2
+end
+
 #
 # The transport employing this codec will typically create
 # multiple instances of the codec object and will typically do
@@ -81,6 +111,14 @@ class LogStash::Codecs::Telemetry < LogStash::Codecs::Base
   # When flattening, we use a delimeter in the flattened path.
   #
   config :xform_flat_delimeter, :validate => :string, :default => "~"
+
+  #
+  # Wire format version number.
+  #
+  # XR 6.0 streams to the default version 1
+  # XR 6.1 streams and later, require wire_format 2.
+  #
+  config :wire_format, :validate => :number, :default => 1
 
   #
   # Change state to reflect whether we are waiting for length or data.
@@ -229,8 +267,14 @@ class LogStash::Codecs::Telemetry < LogStash::Codecs::Base
     #
     @partial_stream = nil
     @codec_state = TSCodecState::TS_CODEC_PENDING_HEADER
-    @pending_bytes = TS_CODEC_HEADER_LENGTH_IN_BYTES
-    @zstream = nil
+    @zstream = Zlib::Inflate.new
+    @data_compressed = 0
+
+    if (@wire_format == 2)
+      @pending_bytes = TS_CODEC_HEADER_LENGTH_IN_BYTES_V2
+    else
+      @pending_bytes = TS_CODEC_HEADER_LENGTH_IN_BYTES
+    end
 
     @logger.info("Registering cisco telemetry stream codec")
 
@@ -293,7 +337,19 @@ class LogStash::Codecs::Telemetry < LogStash::Codecs::Base
         #
         # Handle message header - just currently one field, length.
         #
-        next_msg_length_in_bytes, data = data.unpack('Na*')
+        if (@wire_format == 2)
+          next_message_type, @data_compressed, next_msg_length_in_bytes, data =
+            data.unpack('NNNa*')
+          #
+          # In v2, compressor is never reset and a compressor per session is
+          # used.
+          #
+          if next_message_type != TSCodecTLVTypeV2::TS_CODEC_TLV_TYPE_V2_JSON
+            raise "Unexpected message type for v2 (v1 stream from XR 6.0?)"
+          end
+        else
+          next_msg_length_in_bytes, data = data.unpack('Na*')
+        end
         ts_codec_change_state(TSCodecState::TS_CODEC_PENDING_DATA,
                               next_msg_length_in_bytes)
 
@@ -304,24 +360,47 @@ class LogStash::Codecs::Telemetry < LogStash::Codecs::Base
         #
         msg, data = data.unpack("a#{@pending_bytes}a*")
 
-        ts_codec_change_state(TSCodecState::TS_CODEC_PENDING_HEADER,
-                              TS_CODEC_HEADER_LENGTH_IN_BYTES)
+        if (@wire_format == 2)
+          l = @pending_bytes
+          ts_codec_change_state(TSCodecState::TS_CODEC_PENDING_HEADER,
+                                TS_CODEC_HEADER_LENGTH_IN_BYTES_V2)
+        else
+          ts_codec_change_state(TSCodecState::TS_CODEC_PENDING_HEADER,
+                                TS_CODEC_HEADER_LENGTH_IN_BYTES)
+        end
 
         while msg != ""
 
-          t, l, msg = msg.unpack('NNa*')
+          if (@wire_format == 2)
+            #
+            # Set type to JSON, asserted in header processing above
+            #
+            t = TSCodecTLVType::TS_CODEC_TLV_TYPE_JSON
+          else
+            t, l, msg = msg.unpack('NNa*')
+            #
+            # Format prior to v2 was always COMPRESSED JSON
+            #
+            @data_compressed = 1
+          end
   
           case t
 
-          when TSCodecTLVType::TS_CODEC_TLV_TYPE_COMPRESSED_JSON
+          when TSCodecTLVType::TS_CODEC_TLV_TYPE_JSON
             
             v, msg = msg.unpack("a#{l}a*")
-            dump = v.unpack('H*')
-            decompressed_unit = @zstream.inflate(v)
-            @logger.debug? &&
+            #dump = v.unpack('H*')
+
+            if @data_compressed == 1
+              decompressed_unit = @zstream.inflate(v)
+              @logger.debug? &&
               @logger.debug("Parsed message", :zmsgtype => t, :zmsglength => l,
                             :msglength => decompressed_unit.length,
                             :decompressor => @zstream)
+            else
+              decompressed_unit = v
+            end
+
             begin
               parsed_unit = JSON.parse(decompressed_unit)
             rescue JSON::ParserError => e
@@ -368,7 +447,13 @@ class LogStash::Codecs::Telemetry < LogStash::Codecs::Base
               @logger.debug("Yielding COMPRESSOR RESET  decompressor",
                             :decompressor => @zstream)
 
-          end # case on TLV type
+          else
+            # default case, something's gone awry
+            @logger.error("Resetting connection on unknown TLV type",
+                           :type => t)
+            raise 'Unexpected message type in TLV:. Reset connection'
+          end
+
         end # end look through TLVs
 
       end # handling header or payload case
