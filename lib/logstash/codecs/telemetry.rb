@@ -432,6 +432,15 @@ class LogStash::Codecs::Telemetry < LogStash::Codecs::Base
                   "version" => parsed_unit['Version'],
                   "end_time" => parsed_unit['End Time']}
 
+                if event["end_time"].nil?
+                  #
+                  # Pertinent IOS-XR 6.0.1 content
+                  #
+                  event["end_time"] = parsed_unit["CollectionEndTime"]
+                  event["start_time"] = parsed_unit["CollectionStartTime"]
+                  event["collection_id"] = parsed_unit["CollectionID"]
+                end
+
                 @logger.debug? &&
                   @logger.debug("Yielding flat event", :event => event)
                 yield LogStash::Event.new(event)
