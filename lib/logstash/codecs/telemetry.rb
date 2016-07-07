@@ -51,8 +51,9 @@ end
 #       |T|F|L|V... ||T|F|L|V... ||T|F|L|V...|
 #       +-+-+-+-...-++-+-+-+-...-++-+-+-+-...+
 #
-# T   - 32 bits, type (GPB compact == 3, GPB kv == 4)
+# T   - 32 bits, type ( JSON == 2, GPB compact == 3, GPB kv == 4)
 # F   - 32 bits, 0x0 No flags set – default behavior - nocompression
+#		 0x1 indicates ZLIB compression, set when T == 2|3|4
 # L   - 32 bits, Length of block excluding header
 # V   - Data block
 #
@@ -203,7 +204,7 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
   # to use a protocol compiler which supports Ruby
   # bindings for proto2 (e.g. ruby-protocol-buffer gem)
   #
-  config :protofiles, :validate => :path, :required => true
+  config :protofiles, :validate => :path, :default => "./"
 
 
   ############**********************************
@@ -345,13 +346,54 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
     end # branch, v iteration over hash passed down
   end # ts_codec_extract_path_key_value
 
+
+  #
+  # telemetry_kv.proto
+  #
+  #
+  # message Telemetry {
+  #   optional uint64   collection_id = 1;
+  #   optional string   base_path = 2;	
+  #   optional string   subscription_identifier = 3;
+  #   optional string   model_version = 4;
+  #   optional uint64   collection_start_time = 5;
+  #   optional uint64   msg_timestamp = 6;
+  #   repeated TelemetryField tables = 14;
+  #   optional uint64   collection_end_time = 15;
+  # }
+  #
+  # message TelemetryTable {
+  #   optional uint64         timestamp = 1;
+  #   optional string         name = 2;
+  #   optional bool           augment_data = 3;
+  #   oneof value_by_type {
+  #     bytes          bytes_value = 4;
+  #     string         string_value = 5;
+  #     bool           bool_value = 6;
+  #     uint32         uint32_value = 7;
+  #     uint64         uint64_value = 8;
+  #     sint32         sint32_value = 9;
+  #     sint64         sint64_value = 10;  
+  #     double         double_value = 11;
+  #     float          float_value = 12;
+  #   }
+  #   repeated TelemetryTable tables = 15;
+  # }
+  #
+  
+  # 
+  # recursif function to decode TelemetryTable message
+  # and produce event
+  #
   private
-  def decode_kv_table(table,evs)
+  def produce_event_from_gpbkv_stream(table,evs,time_inherit)
 
     ev = Hash.new
 
     if table[:timestamp]
-      ev[:timest] = Time.at(table[:timestamp]).to_datetime
+      ev[:timest] = table[:timestamp]
+    else
+      ev[:timest] = time_inherit
     end
 
     datatypes = Array[:bytes_value,
@@ -380,11 +422,9 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
       sub_tables = table[:tables]
       evs_sub = Hash.new
       sub_tables.each do |sub_table|
-        decode_kv_table(sub_table,evs_sub)
+        produce_event_from_gpbkv_stream(sub_table,evs_sub,ev[:timest])
       end
       ev[:content] = evs_sub
-    else
-      @logger.debug? && @logger.debug("Iteration end")
     end
 
     if evs.class == Hash
@@ -617,141 +657,153 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
 
         when TSCodecTLVTypeV2::TS_CODEC_TLV_TYPE_V2_GPB_COMPACT
           #####decode_compact(msg)
-          v, msg = msg.unpack("a#{l}a*")
+          if @protofiles_map.length != 0
+            begin
+              v, msg = msg.unpack("a#{l}a*")
 
-          if @data_compressed == 1
-            decompressed_unit = @zstream.inflate(v)
-            @logger.debug? &&
-            @logger.debug("Parsed message", :zmsgtype => t, :zmsglength => l,
-                          :msglength => decompressed_unit.length,
-                          :decompressor => @zstream)
-          else
-            decompressed_unit = v
-          end
-
-          msg_gpb = TelemetryHeader.new
-
-          begin
-            msg_out = msg_gpb.parse(decompressed_unit).to_hash
-            tables = msg_out.delete(:tables)
-            tables.each do |table|
-
-              @logger.debug? &&
-                @logger.debug("Message policy paths",
-                              :identifier => msg_out[:identifier],
-                              :policy_name => msg_out[:policy_name],
-                              :end_time => msg_out[:end_time],
-                              :policy_path => table[:policy_path])
-
-              #
-              # Map row to appropriate sub-message type and decode.
-              #
-              if @protofiles_map.has_key? table[:policy_path]
-                row_decoder_name = @protofiles_map[table[:policy_path]]
-                begin
-
-                  row_decoder_class = row_decoder_name[0]
-                  rows = table[:row]
-                  rows.each do |row|
-
-                    @logger.debug? &&
-                      @logger.debug("Raw row", :row_raw => row.to_s,
-                                    :row_decoder_name => row_decoder_name,
-                                    :row_decoder_class => row_decoder_class.to_s)
-
-                    #
-                    # Perhaps just clear the object as opposed to allocate
-                    # it for every iteration.
-                    #
-                    row_decoder = row_decoder_class.new
-                    row_out = row_decoder.parse(row).to_hash
-                    @logger.debug? &&
-                      @logger.debug("Decoded row",
-                                    :row_out => row_out.to_s)
-
-                    #
-                    # Merge header and row, stringify keys, and yield.
-                    #
-                    # Stringify operation copes with nested hashes too.
-                    # .stringify in rails is what I am looking for, but this
-                    # is not rails.
-                    #
-                    ev = msg_out.clone
-                    ev[:end_time] = msg_out[:end_time]
-                    ev[:content] = row_out
-                    ev[:type] = row_decoder_name[1]
-                    ev[:path] = table[:policy_path]
-                    yield LogStash::Event.new(JSON.parse(ev.to_json))
-
-                  end # End of iteration over rows
-
-                rescue Exception => e
-                  @logger.warn("Failed to decode telemetry row",
-                               :policy_path => table[:policy_path],
-                               :decoder => row_decoder_name,
-                               :exception => e, :stacktrace => e.backtrace)
-                end # End of exception handling of row decode
-
-                @logger.debug? && @logger.debug("Iteration end")
-
-              else # No decoder is available
-
+              if @data_compressed == 1
+                decompressed_unit = @zstream.inflate(v)
                 @logger.debug? &&
-                  @logger.debug("No decoder available",
-                                :policy_path => table[:policy_path])
+                @logger.debug("Parsed message", :zmsgtype => t, :zmsglength => l,
+                              :msglength => decompressed_unit.length,
+                              :decompressor => @zstream)
+              else
+                decompressed_unit = v
+              end
 
-              end # End of cases where a decoder is available, or not
+              msg_gpb = TelemetryHeader.new
 
-            end # End of iteration over each table
+              begin
+                msg_out = msg_gpb.parse(decompressed_unit).to_hash
+                tables = msg_out.delete(:tables)
+                tables.each do |table|
 
-          rescue Exception => e
-            @logger.warn("Failed to decode telemetry header",
-                         :data => decompressed_unit,
-                         :exception => e, :stacktrace => e.backtrace)
+                  @logger.debug? &&
+                    @logger.debug("Message policy paths",
+                                  :identifier => msg_out[:identifier],
+                                  :policy_name => msg_out[:policy_name],
+                                  :end_time => msg_out[:end_time],
+                                  :policy_path => table[:policy_path])
+
+                  #
+                  # Map row to appropriate sub-message type and decode.
+                  #
+                  if @protofiles_map.has_key? table[:policy_path]
+                    row_decoder_name = @protofiles_map[table[:policy_path]]
+                    begin
+
+                      row_decoder_class = row_decoder_name[0]
+                      rows = table[:row]
+                      rows.each do |row|
+
+                        @logger.debug? &&
+                          @logger.debug("Raw row", :row_raw => row.to_s,
+                                        :row_decoder_name => row_decoder_name,
+                                        :row_decoder_class => row_decoder_class.to_s)
+
+                        #
+                        # Perhaps just clear the object as opposed to allocate
+                        # it for every iteration.
+                        #
+                        row_decoder = row_decoder_class.new
+                        row_out = row_decoder.parse(row).to_hash
+                        @logger.debug? &&
+                          @logger.debug("Decoded row",
+                                        :row_out => row_out.to_s)
+
+                        #
+                        # Merge header and row, stringify keys, and yield.
+                        #
+                        # Stringify operation copes with nested hashes too.
+                        # .stringify in rails is what I am looking for, but this
+                        # is not rails.
+                        #
+                        ev = msg_out.clone
+                        ev[:end_time] = msg_out[:end_time]
+                        ev[:content] = row_out
+                        ev[:type] = row_decoder_name[1]
+                        ev[:path] = table[:policy_path]
+                        yield LogStash::Event.new(JSON.parse(ev.to_json))
+
+                      end # End of iteration over rows
+
+                    rescue Exception => e
+                      @logger.warn("Failed to decode telemetry row",
+                                   :policy_path => table[:policy_path],
+                                   :decoder => row_decoder_name,
+                                   :exception => e, :stacktrace => e.backtrace)
+                    end # End of exception handling of row decode
+
+                    @logger.debug? && @logger.debug("Iteration end")
+
+                  else # No decoder is available
+
+                    @logger.debug? &&
+                      @logger.debug("No decoder available",
+                                    :policy_path => table[:policy_path])
+
+                  end # End of cases where a decoder is available, or not
+
+                end # End of iteration over each table
+
+              rescue Exception => e
+                @logger.warn("Failed to decode telemetry header",
+                             :data => decompressed_unit,
+                             :exception => e, :stacktrace => e.backtrace)
+              end
+            end
+          else
+            @logger.warn("No setup to decode gpb, received gpb content is dropped ")
           end
 
         when TSCodecTLVTypeV2::TS_CODEC_TLV_TYPE_V2_GPB_KV
           #####!!!!decode_kv(msg)
-          v, msg = msg.unpack("a#{l}a*")
+          if @protofiles_map.length != 0
+            begin
+              v, msg = msg.unpack("a#{l}a*")
 
-          if @data_compressed == 1
-            decompressed_unit = @zstream.inflate(v)
-            @logger.debug? &&
-            @logger.debug("Parsed message", :zmsgtype => t, :zmsglength => l,
-                          :msglength => decompressed_unit.length,
-                          :decompressor => @zstream)
-          else
-            decompressed_unit = v
-          end
+              if @data_compressed == 1
+                decompressed_unit = @zstream.inflate(v)
+                @logger.debug? &&
+                @logger.debug("Parsed message", :zmsgtype => t, :zmsglength => l,
+                              :msglength => decompressed_unit.length,
+                              :decompressor => @zstream)
+              else
+                decompressed_unit = v
+              end
 
-          msg_gpb = Telemetry.new
-          evs = Array.new
+              msg_gpb = Telemetry.new
+              evs = Array.new
 
-          begin
-            msg_out = msg_gpb.parse(decompressed_unit).to_hash
-            tables = msg_out.delete(:tables)
-            tables.each do |table|
+              begin
+                msg_out = msg_gpb.parse(decompressed_unit).to_hash
+                tables = msg_out.delete(:tables)
+                tables.each do |table|
 
-              @logger.debug? &&
-                @logger.debug("Message policy paths",
-                              :collection_id => msg_out[:collection_id],
-                              :base_path => msg_out[:base_path],
-                              :msg_timestamp => msg_out[:msg_timestamp])
+                  @logger.debug? &&
+                    @logger.debug("Message policy paths",
+                                  :collection_id => msg_out[:collection_id],
+                                  :base_path => msg_out[:base_path],
+                                  :msg_timestamp => msg_out[:msg_timestamp])
 
-              decode_kv_table(table,evs)
-            end # End of iteration over each table
+                  produce_event_from_gpbkv_stream(table,evs,msg_out[:msg_timestamp])
+                end # End of iteration over each table
 
-            evs.each do |ev|
-              ev.update(msg_out)
-              yield LogStash::Event.new(JSON.parse(ev.to_json))
+                evs.each do |ev|
+                  ev.update(msg_out)
+                  yield LogStash::Event.new(JSON.parse(ev.to_json))
+                end
+
+              rescue Exception => e
+                @logger.warn("Failed to decode telemetry kv",
+                             :data => decompressed_unit,
+                             :exception => e, :stacktrace => e.backtrace)
+              end
             end
-
-          rescue Exception => e
-            @logger.warn("Failed to decode telemetry kv",
-                         :data => decompressed_unit,
-                         :exception => e, :stacktrace => e.backtrace)
+          else
+            @logger.warn("No setup to decode gpb_kv, received gpb_kv content is dropped ")
           end
-          
+         
         else
           # default case, something's gone awry
           @logger.error("Resetting connection on unknown type",
