@@ -223,7 +223,7 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
   end
 
   private
-  def ts_codec_extract_path_key_value(path, data, filter_table, depth)
+  def ts_codec_extract_path_key_value(path_raw,path, data, filter_table, depth)
     #
     # yield path,type,value triples from "Data" hash
     #
@@ -334,14 +334,69 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
         #
         # Lets walk down into this object and see what it yields.
         #
-        ts_codec_extract_path_key_value(path_and_branch, v,
+        ts_codec_extract_path_key_value(path_raw, path_and_branch, v,
                                         new_filter_table, depth + 1) do
           |newp, newk, newv|
           yield newp, newk, newv
         end
 
       else # This is not a hash, and therefore will be yielded (note: arrays too)
-        yield path, branch, v
+        # 
+        # in this case, we inherit the path and type from the raw data and do the conversion
+        #
+        path_found = path_raw
+        branch_found = branch
+
+        found = false
+
+        # find the correspond filter
+        filter_table.each do |name_filter|
+
+          filter_path_raw = path_raw.split('.')
+          filter_path = name_filter[:filter]
+
+          #
+          # match the sub_path_raw with sub_filter
+          # 
+          for index in 0..(filter_path_raw.size-1) do
+            sub_path = filter_path_raw[index]
+            sub_filter = filter_path[index]
+            sub_filter_next = filter_path[index+1]
+
+            if sub_filter
+              # /^(?<InterfaceName>.*)$/ to_s (?-mix:^(?<InterfaceName>.*)$)
+              # pass the regex element
+              if sub_filter.to_s.include? ".*" or sub_filter.to_s.include? "\d"
+                found = true
+              else
+                sub_match = sub_path.match(sub_filter)
+                if sub_match.nil?
+                  found = false
+                else
+                  found = true
+                end
+              end
+            else
+              found = false
+            end
+
+            if found
+              next
+            else
+              break
+            end
+
+          end
+
+          # make sure the length of filter and raw are equal
+          if found && sub_filter_next.nil?
+            path_found = path_raw.gsub('.',@xform_flat_delimeter)
+            branch_found = name_filter[:name]
+            break
+          end
+        end
+
+        yield path_found, branch_found, v
       end
     end # branch, v iteration over hash passed down
   end # ts_codec_extract_path_key_value
@@ -624,7 +679,7 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
               #
               # Flatten JSON to path+type (key), value
               #
-              ts_codec_extract_path_key_value("DATA",
+              ts_codec_extract_path_key_value(parsed_unit["Path"],"DATA",
                                               parsed_unit["Data"],
                                               @filter_table, 0) do
                 |path,type,content|
