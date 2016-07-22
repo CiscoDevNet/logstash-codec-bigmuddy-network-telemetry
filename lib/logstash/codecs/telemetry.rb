@@ -813,7 +813,7 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
 
         when TSCodecTLVTypeV2::TS_CODEC_TLV_TYPE_V2_GPB_KV
           #####!!!!decode_kv(msg)
-          if @protofiles_map.length != 0
+          if defined?(Telemetry) == 'constant' && Telemetry.class == Class
             begin
               v, msg = msg.unpack("a#{l}a*")
 
