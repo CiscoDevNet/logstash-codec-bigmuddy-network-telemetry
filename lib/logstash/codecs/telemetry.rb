@@ -122,10 +122,13 @@ def telemetry_gpb_extract_cisco_extensions_from_proto protofile
     #
     # Extract bag name and path from metadata.
     #
-    m = line.match('.*metadata.*\\\"bag\\\": \\\"(?<bag>[\d\w]*)\\\".*\\\"schema_path\\\": \\\"(?<path>[\d\w\.]*)\\\".*') 
-    if m and m['bag'] and m['path']
+    #m = line.match('.*metadata.*\\\"bag\\\": \\\"(?<bag>[\d\w]*)\\\".*\\\"schema_path\\\": \\\"(?<path>[\d\w\.]*)\\\".*')
+    
+    m = line.match('.*metadata.*\\\"bag\\\": \\\"(?<bag>[\d\w]*)\\\".*')
+    n = line.match('.*metadata.*\\\"schema_path\\\": \\\"(?<path>[\d\w\.]*)\\\".*')
+    if m and n and m['bag'] and n['path']
       classname = telemetry_gpb_camelise m['bag']
-      path = m['path']
+      path = n['path']
     end
 
   end # End of line by line iteration on file.
