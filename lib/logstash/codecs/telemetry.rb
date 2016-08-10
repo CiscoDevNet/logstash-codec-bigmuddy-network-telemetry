@@ -657,7 +657,7 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
             if @data_compressed == 1
               decompressed_unit = @zstream.inflate(v)
               @logger.debug? &&
-              @logger.debug("Parsed message", :zmsgtype => t, :zmsglength => l,
+              @logger.debug("Parsed message", :zmsgtype => @type, :zmsglength => l,
                             :msglength => decompressed_unit.length,
                             :decompressor => @zstream)
             else
@@ -722,7 +722,7 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
               if @data_compressed == 1
                 decompressed_unit = @zstream.inflate(v)
                 @logger.debug? &&
-                @logger.debug("Parsed message", :zmsgtype => t, :zmsglength => l,
+                @logger.debug("Parsed message", :zmsgtype => @type, :zmsglength => l,
                               :msglength => decompressed_unit.length,
                               :decompressor => @zstream)
               else
@@ -823,7 +823,7 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
               if @data_compressed == 1
                 decompressed_unit = @zstream.inflate(v)
                 @logger.debug? &&
-                @logger.debug("Parsed message", :zmsgtype => t, :zmsglength => l,
+                @logger.debug("Parsed message", :zmsgtype => @type, :zmsglength => l,
                               :msglength => decompressed_unit.length,
                               :decompressor => @zstream)
               else
@@ -893,4 +893,3 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
   end # def encode
 
 end # class LogStash::Codecs::TelemetryStream
-
