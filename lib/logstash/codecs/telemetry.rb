@@ -232,7 +232,7 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
   # Wire format version number.
   #
   # XR 6.0 streams to the default version 1
-  # XR 6.1 streams , require wire_format 2.
+  # XR 6.0.1 streams , require wire_format 2.
   # XR 6.1.1 streams, require wire_format 3.
   #
   # config :wire_format, :validate => :number, :default =>
