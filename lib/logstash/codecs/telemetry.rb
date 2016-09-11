@@ -72,6 +72,51 @@ module TSCodecTLVTypeV2
 end
 
 #
+# IOS XR 6.1.1 wire format (version 3)
+#
+# JSON and GPB Telemetry encoding
+#
+# ----------------------------------
+#
+# *   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+# *   |          MSG TYPE             |           ENCODING_TYPE       |
+# *   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+# *   |         MSG_VERSION           |           FLAGS             |C|
+# *   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+# *   |                           MSG_LENGTH                          |
+# *   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+# *   ~                                                               ~
+# *   ~                      PAYLOAD (MSG_LENGTH bytes)               ~
+# *   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+#
+# MSG TYPE      - 16 bits (TELEMETRY_DATA  == 1, HEARTBEAT == 2)
+# ENCODING_TYPE - 16 bits (GPB  == 1, JSON == 2)
+# MSG_VERSION   - 16 bits, 0x0001
+# FLAGS         - 16 bits, COMPRESSION = 0x0001
+# MSG_LENGTH    - 32 bits, Length of block excluding header
+# PAYLOAD       - Data block
+#
+# ----------------------------------
+
+MDT_CODEC_HEADER_LENGTH_IN_BYTES_V3 = 12
+
+module MDTMSGTypeV3
+  MDT_MSG_TYPE_V3_TELEMETRY_DATA = 1
+  MDT_MSG_TYPE_V3_HEARTBEAT = 2
+end
+
+module MDTMSGCodecTypeV3
+  MDT_MSG_ENC_TYPE_V3_GPB  = 1
+  MDT_MSG_ENC_TYPE_V3_JSON = 2
+end
+
+MDTMSGVersionV3 = 1
+
+module MDTMSGFlagsV3
+  MDT_MSG_FLAGS_TYPE_V3_COMPRESSION = 0x0001
+end
+
+#
 # Outermost description of the messages in the stream
 #
 module TSCodecState
@@ -107,7 +152,7 @@ def telemetry_gpb_extract_cisco_extensions_from_proto protofile
     # Extract module - this is important to protect against name space
     # pollution (e.g. where multiple sysdb bags point at the same bag)
     #
-    m = line.match('package \s*(?<modulename>[\w\.]+)\s*;') 
+    m = line.match('package \s*(?<modulename>[\w\.]+)\s*;')
     if m and m['modulename']
       modulenames = m['modulename'].split('.').map do |raw|
         #
@@ -123,7 +168,7 @@ def telemetry_gpb_extract_cisco_extensions_from_proto protofile
     # Extract bag name and path from metadata.
     #
     #m = line.match('.*metadata.*\\\"bag\\\": \\\"(?<bag>[\d\w]*)\\\".*\\\"schema_path\\\": \\\"(?<path>[\d\w\.]*)\\\".*')
-    
+
     m = line.match('.*metadata.*\\\"bag\\\": \\\"(?<bag>[\d\w]*)\\\".*')
     n = line.match('.*metadata.*\\\"schema_path\\\": \\\"(?<path>[\d\w\.]*)\\\".*')
     if m and n and m['bag'] and n['path']
@@ -159,6 +204,9 @@ end
 #
 class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
   config_name "telemetry"
+  ############## mdt
+  config :mdt, :validate => :boolean, :default => true, :required => true
+
   ##############json
   #
   # Pick transformation we choose to apply in codec. The choice will
@@ -184,9 +232,10 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
   # Wire format version number.
   #
   # XR 6.0 streams to the default version 1
-  # XR 6.1 streams and later, require wire_format 2.
+  # XR 6.1 streams , require wire_format 2.
+  # XR 6.1.1 streams, require wire_format 3.
   #
-  #config :wire_format, :validate => :number, :default => 1
+  # config :wire_format, :validate => :number, :default =>
 
   ##############gpb
   #
@@ -344,7 +393,7 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
         end
 
       else # This is not a hash, and therefore will be yielded (note: arrays too)
-        # 
+        #
         # in this case, we inherit the path and type from the raw data and do the conversion
         #
         path_found = path_raw
@@ -360,7 +409,7 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
 
           #
           # match the sub_path_raw with sub_filter
-          # 
+          #
           for index in 0..(filter_path_raw.size-1) do
             sub_path = filter_path_raw[index]
             sub_filter = filter_path[index]
@@ -411,7 +460,7 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
   #
   # message Telemetry {
   #   optional uint64   collection_id = 1;
-  #   optional string   base_path = 2;	
+  #   optional string   base_path = 2;
   #   optional string   subscription_identifier = 3;
   #   optional string   model_version = 4;
   #   optional uint64   collection_start_time = 5;
@@ -431,15 +480,15 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
   #     uint32         uint32_value = 7;
   #     uint64         uint64_value = 8;
   #     sint32         sint32_value = 9;
-  #     sint64         sint64_value = 10;  
+  #     sint64         sint64_value = 10;
   #     double         double_value = 11;
   #     float          float_value = 12;
   #   }
   #   repeated TelemetryTable tables = 15;
   # }
   #
-  
-  # 
+
+  #
   # recursif function to decode TelemetryTable message
   # and produce event
   #
@@ -452,6 +501,10 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
       ev[:timest] = table[:timestamp]
     else
       ev[:timest] = time_inherit
+    end
+
+    if table.has_key?("name")
+      ev[:name] = table[:name].to_s
     end
 
     datatypes = Array[:bytes_value,
@@ -478,7 +531,11 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
 
     if table[:tables].length != 0
       sub_tables = table[:tables]
-      evs_sub = Hash.new
+      if table[:tables].length == 1
+        evs_sub = Hash.new
+      else
+        evs_sub = Array.new
+      end
       sub_tables.each do |sub_table|
         produce_event_from_gpbkv_stream(sub_table,evs_sub,ev[:timest])
       end
@@ -493,7 +550,7 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
   end
 
   ############********************************
-  
+
   public
   def register
     #
@@ -511,7 +568,7 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
 
     @logger.info("Registering cisco telemetry stream codec")
 
-    #########################json  
+    #########################json
     #
     # Preprocess the regexps strings provided, and build them out into
     # an array of hashes of the form (name, filter).
@@ -608,23 +665,36 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
 
       when TSCodecState::TS_CODEC_PENDING_HEADER
 
-        #
-        # Handle message header - just currently one field, length.
-        #
-        next_msg_length_in_bytes, data = data.unpack('Na*')
-
-        if (next_msg_length_in_bytes > 4)
-          @wire_format = 1
+        if (@mdt)
           #
-          # Format prior to v1 was always COMPRESSED JSON
+          # Handle MDT message header
           #
-          @data_compressed = 1
+          @wire_format = 3
+          mdt_msg_type,data = data.unpack('na*')
+          if (mdt_msg_type == 1)
+            @type,mdt_msg_version, @data_compressed,next_msg_length_in_bytes,data = data.unpack('nnnNa*')
+          else
+            @logger.debug? &&
+            @logger.debug("MDT Message type is HEARTBEAT")
+          end
         else
-          @wire_format = 2
-          next_message_type = next_msg_length_in_bytes;
-          @data_compressed, next_msg_length_in_bytes, data =
+          #
+          # Handle PDT message header
+          #
+          next_msg_length_in_bytes, data = data.unpack('Na*')
+          if (next_msg_length_in_bytes > 4)
+            @wire_format = 1
+            #
+            # Format prior to v1 was always COMPRESSED JSON
+            #
+            @data_compressed = 1
+          else
+            @wire_format = 2
+            next_message_type = next_msg_length_in_bytes;
+            @data_compressed, next_msg_length_in_bytes, data =
             data.unpack('NNa*')
-          @type = next_message_type
+            @type = next_message_type
+          end
         end
         ts_codec_change_state(TSCodecState::TS_CODEC_PENDING_DATA,
                             next_msg_length_in_bytes)
@@ -633,7 +703,7 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
 
         msg, data = data.unpack("a#{@pending_bytes}a*")
 
-        if (@wire_format == 2)
+        if (@wire_format != 1)
           l = @pending_bytes
           ts_codec_change_state(TSCodecState::TS_CODEC_PENDING_HEADER,
                                 TS_CODEC_HEADER_LENGTH_IN_BYTES_V2)
@@ -645,11 +715,101 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
 
         case @type
 
-        when TSCodecTLVType::TS_CODEC_TLV_TYPE_COMPRESSOR_RESET
-          @zstream = Zlib::Inflate.new
-          @logger.debug? &&
-            @logger.debug("Yielding COMPRESSOR RESET  decompressor",
-                          :decompressor => @zstream)
+        when MDTMSGCodecTypeV3::MDT_MSG_ENC_TYPE_V3_GPB #(or TSCodecTLVType::TS_CODEC_TLV_TYPE_COMPRESSOR_RESET)
+          if (@wire_format == 1)
+            @zstream = Zlib::Inflate.new
+            @logger.debug? &&
+              @logger.debug("Yielding COMPRESSOR RESET  decompressor",
+                            :decompressor => @zstream)
+          else
+            ## decode MDT GPB
+            begin
+              v, msg = msg.unpack("a#{l}a*")
+
+              if @data_compressed == 1
+                decompressed_unit = @zstream.inflate(v)
+                @logger.debug? &&
+                @logger.debug("Parsed message", :zmsgtype => @type, :zmsglength => l,
+                              :msglength => decompressed_unit.length,
+                              :decompressor => @zstream)
+              else
+                decompressed_unit = v
+              end
+
+              msg = Telemetry.new
+
+              begin
+
+                msg_out = msg.parse(decompressed_unit).to_hash
+                data_gpbkv = msg_out.delete(:data_gpbkv)
+                data_gpb = msg_out.delete(:data_gpb)
+
+                # data_gpbkv decode
+                if not data_gpbkv.nil?
+                  evs = Array.new
+                  data_gpbkv.each do |table|
+                    @logger.debug? &&
+                      @logger.debug("MDT GPBKV Message policy paths",
+                                    :node_id => msg_out[:node_id],
+                                    :subscription => msg_out[:subscription],
+                                    :collection_id => msg_out[:collection_id],
+                                    :encoding_path => msg_out[:encoding_path ],
+                                    :msg_timestamp => msg_out[:msg_timestamp])
+
+                    produce_event_from_gpbkv_stream(table,evs,msg_out[:msg_timestamp])
+                  end # End of iteration over each table
+
+                  evs.each do |ev|
+                    ev.update(msg_out)
+                    yield LogStash::Event.new(JSON.parse(ev.to_json))
+                  end
+                end
+
+                # data_gpb decode
+                if not data_gpb.nil?
+                  data_gpb.each do |table|
+
+                    @logger.debug? &&
+                      @logger.debug("MDT GPB Message policy paths",
+                                    :node_id => msg_out[:node_id],
+                                    :subscription => msg_out[:subscription],
+                                    :collection_id => msg_out[:collection_id],
+                                    :encoding_path => msg_out[:encoding_path],
+                                    :msg_timestamp => msg_out[:msg_timestamp])
+
+                    yield LogStash::Event.new(JSON.parse(msg_out.to_json))
+
+                    if @protofiles_map.has_key? msg_out[:encoding_path]
+                      row_decoder_name = @protofiles_map[msg_out[:encoding_path]]
+                      row_decoder_class = row_decoder_name[0]
+
+                      rows = table[:row]
+                      rows.each do |row|
+                        row_decoder = row_decoder_class.new
+                        row_out = row_decoder.parse(row[:content]).to_hash
+
+                        ev = Hash.new
+                        ev[:timestamp] = row[:timestamp]
+                        ev[:content] = row_out
+                        ev[:keys] = row[:keys]
+                        yield LogStash::Event.new(JSON.parse(ev.to_json))
+                      end
+
+                    else
+                        @logger.warn("Failed to decode MDT GPB rows",
+                                     :policy_path => msg_out[:encoding_path],
+                                     :exception => e, :stacktrace => e.backtrace)
+                    end # End of exception handling of row decode
+                  end
+                end
+
+              rescue Exception => e
+                @logger.warn("Failed to decode MDT GPB",
+                             :data => decompressed_unit,
+                             :exception => e, :stacktrace => e.backtrace)
+              end
+            end
+          end
 
         when TSCodecTLVType::TS_CODEC_TLV_TYPE_JSON  #(or TSCodecTLVTypeV2::TS_CODEC_TLV_TYPE_V2_JSON)
             v, msg = msg.unpack("a#{l}a*")
@@ -861,14 +1021,14 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
           else
             @logger.warn("No setup to decode gpb_kv, received gpb_kv content is dropped ")
           end
-         
+
         else
           # default case, something's gone awry
           @logger.error("Resetting connection on unknown type",
                          :type => @type)
           raise 'Unexpected message type in TLV:. Reset connection'
         end
-      
+
       end
     end
 
@@ -893,3 +1053,4 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
   end # def encode
 
 end # class LogStash::Codecs::TelemetryStream
+
