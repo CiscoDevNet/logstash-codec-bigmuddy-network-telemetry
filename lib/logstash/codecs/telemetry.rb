@@ -539,7 +539,11 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
       sub_tables.each do |sub_table|
         produce_event_from_gpbkv_stream(sub_table,evs_sub,ev[:timest])
       end
-      ev[:content] = evs_sub
+      name = table[:name].to_s
+     if name == ""
+       name = "data_gpbkv"
+     end
+     ev[name] = evs_sub
     end
 
     if evs.class == Hash
