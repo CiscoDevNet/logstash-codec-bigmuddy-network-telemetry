@@ -497,11 +497,13 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
 
     ev = Hash.new
 
-    if table[:timestamp]
-      ev[:timest] = table[:timestamp]
-    else
-      ev[:timest] = time_inherit
-    end
+    # Stop timest output per table
+
+    #if table[:timestamp]
+    #  ev[:timest] = table[:timestamp]
+    #else
+    #  ev[:timest] = time_inherit
+    #end
 
     if table.has_key?("name")
       ev[:name] = table[:name].to_s
@@ -529,17 +531,26 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
       end
     end
 
+    @logger.debug("print table",
+                  :table => table)
+
+    # By not creating an Array, Kibaba friendly JSON data is generated.
+    # Kibana is a specification that can not be Visualize if JSON Array exists.
+    # There may be bugs due to not creating Array.
     if table[:tables].length != 0
       sub_tables = table[:tables]
-      if table[:tables].length == 1
-        evs_sub = Hash.new
-      else
-        evs_sub = Array.new
-      end
+      evs_sub = Hash.new
       sub_tables.each do |sub_table|
-        produce_event_from_gpbkv_stream(sub_table,evs_sub,ev[:timest])
+        produce_event_from_gpbkv_stream(sub_table,evs_sub,time_inherit)
       end
-      ev[:content] = evs_sub
+
+      name = table[:name].to_s
+      if name == ""
+          name = "telemetry"
+      end
+      has_key = table.has_key?("name")
+
+      ev[name] = evs_sub
     end
 
     if evs.class == Hash
@@ -547,6 +558,11 @@ class LogStash::Codecs::Telemetry< LogStash::Codecs::Base
     else
       evs.push(ev)
     end
+
+    @logger.debug? &&
+    @logger.debug("print evs",
+                  :evs => evs)
+
   end
 
   ############********************************
